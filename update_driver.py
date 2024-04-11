@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
-__date__ = '2022/3/4 14:00'
+__date__ = '2024/4/1 14:00'
 __file__ = 'update_driver.py'
 
 import os
-import re
 import sys
-import zipfile
+import json
+import shutil
 import platform
 import requests
 import subprocess
-from bs4 import BeautifulSoup
 
 
 if platform.system() in 'Windows':
@@ -23,7 +22,7 @@ def make_dir(dir_path):
 
 def set_config():
     name = sys.argv[1] if len(sys.argv) >= 2 else "BaseConf"
-    cls_config = {"BaseConf": BaseConf, "SearchConf": TiebaConf}
+    cls_config = {"BaseConf": BaseConf}
     return cls_config.get(name, BaseConf)
 
 
@@ -55,16 +54,15 @@ class BaseConf(object):
 
     # Win
     chrome_reg = r"SOFTWARE\Google\Chrome\BLBeacon"  # win chrome注册表地址
-    driver_url = "https://npm.taobao.org/mirrors/chromedriver/"
+    driver_url = "https://registry.npmmirror.com/-/binary/chrome-for-testing/"
+    browser_ver = ''  # 浏览器版本号
 
     # 路径配置
     ROOT = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.join(ROOT)  # 驱动路径
-    driver_dir = os.environ['PYTHON']
-
-
-class TiebaConf(BaseConf):
-    url = "http://tieba.baidu.com"  # 测试百度贴吧配置
+    driver_dir = os.environ['python']
+    driver_path = os.path.join(driver_dir, 'chromedriver.exe')
+    system_type = "win64"
 
 
 class Config(set_config()):
@@ -73,108 +71,78 @@ class Config(set_config()):
 
 class Browser(object):
     @classmethod
-    def set_browser(cls):
+    def get_browser_version(cls):
         # 自动检查Chrome版本号
         if Config.SYS == "mac":
             # OS X
             result = subprocess.Popen([r'{}/Google\ Chrome --version'.format(Config.chrome_app)],
                                       stdout=subprocess.PIPE, shell=True)
-            version = [x.decode("utf-8") for x in result.stdout][0].strip().split(" ")[-1]
+            chrome_version = [x.decode("utf-8") for x in result.stdout][0].strip().split(" ")[-1]
         elif Config.SYS == "win":
             import winreg
             try:
                 key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, Config.chrome_reg)
-                version = winreg.QueryValueEx(key, "version")[0]  # 查询注册表chrome版本号
+                chrome_version = winreg.QueryValueEx(key, "version")[0]  # 查询注册表chrome版本号
             except Exception:
                 raise Exception("查询注册表chrome版本失败!")
         else:
             # 设置firefox浏览器信息
             result = subprocess.Popen(['/usr/bin/firefox --version'], stdout=subprocess.PIPE, shell=True)
-            version = [x.decode("utf-8") for x in result.stdout][0].strip().split(" ")[-1]
-            Config.browser_ver = version
+            chrome_version = [x.decode("utf-8") for x in result.stdout][0].strip().split(" ")[-1]
+            Config.browser_ver = chrome_version
             return
-        Config.browser_ver = version
-        file_vr = cls.search_ver(version)
-        if file_vr is None:
-            raise Exception("未获取到chrome版本号! 请检查!")
-        status, file = cls.check_driver(file_vr)
-        if not status:
-            cls.gen_driver(file_vr)
-        else:
-            print("系统已存在chromedriver, 无需下载!")
-            Config.DRIVER_PATH = os.path.join(Config.driver_dir, file)
+        Config.browser_ver = chrome_version
+        return chrome_version
 
     @classmethod
-    def check_driver(cls, version):
-        status, filename = False, None
-        make_dir(Config.driver_dir)  # check driver_dir
-        for root, dirs, files in os.walk(Config.driver_dir):
-            for file in files:
-                if version not in file:
-                    try:
-                        os.remove(os.path.join(root, file))
-                    except:
-                        pass
-                else:
-                    status, filename = True, file
-        return status, filename
+    def get_chromedriver_version(cls, chromedriver_path):
+        if not os.path.exists(chromedriver_path):
+            return None
+        
+        result = subprocess.run([chromedriver_path, "--version"], capture_output=True, text=True)
+        chromedriver_version = result.stdout.split(' ')[1]
+        return chromedriver_version
 
     @classmethod
-    def search_ver_v2(cls, version):
-        ver = ".".join(version.split(".")[:2])
-        r = requests.get(Config.driver_url)
-        bs = BeautifulSoup(r.text, features='html.parser')
-        rt = [x for x in bs.select("pre a")]
-        if not rt:
-            raise Exception("可能淘宝镜像挂了，请重试")
-        for x in rt:
-            if x.text.startswith(ver):
-                return x.text.rstrip("/")
-        else:
-            raise Exception("没有找到当前版本的合适驱动: {}".format(version))
+    def check_version(cls, chrome_version, chromedriver_version):
+        if chromedriver_version is None:
+            return False
+        chrome_major_version = chrome_version.split('.')[:-1]
+        chromedriver_major_version = chromedriver_version.split('.')[:-1]
+        return chrome_major_version == chromedriver_major_version
 
     @classmethod
     def search_ver(cls, version):
+        if version == '':
+            version = cls.get_browser_version()
+
         if version != "unknown":
-            number = version.split(".")[0]
-            file_vr = None
-            url = Config.driver_url + "LATEST_RELEASE"
-            r = requests.get(url)
-            bs = BeautifulSoup(r.text, 'html.parser')
-            latest = bs.text.strip()
-            record = "{}/{}/notes.txt".format(Config.driver_url, latest)
-            info = requests.get(record)
-            text = info.text
-            vr = re.findall(r"-+ChromeDriver\s+(\d+\.\d+\.\d+\.\d+)", text)
-            br = re.findall(r"Supports\s+Chrome\s+version\s+(\d+\d+)", text)
-            if not br:
-                return cls.search_ver_v2(version)
-            # for v, b in zip(vr, br):
-            #     small, bigger = b.split("-")
-            #     if int(small) <= int(number) <= int(bigger):
-            #         # 找到版本号
-            #         print("找到浏览器对应驱动版本号: {}".format(v))
-            #         file_vr = v
-            #         break
-            return vr
+            r = requests.get(Config.driver_url)
+            data = json.loads(r.text)   # 获取所有版本号
+            target_version = tuple(map(int, version.split('.')))
+            versions = [tuple(map(int, item['name'].rstrip('/').split('.'))) for item in data]
+
+            # 过滤出前三个部分与目标版本号一致，且最后一个部分小于目标版本号的版本
+            filtered_versions = [version for version in versions if version[:3] == target_version[:3] and version[3] < target_version[3]]
+
+            # 如果没有符合条件的版本，返回 None
+            if not filtered_versions:
+                return None
+            else:
+                # 在符合条件的版本中，找到最后一个部分最接近目标版本号的版本
+                closest_version = max(filtered_versions, key=lambda version: version[3])
+                return '.'.join(map(str, closest_version))
+
+        return None
 
     @classmethod
     def gen_driver(cls, file_vr):
-        if Config.SYS == "mac":
-            file = "chromedriver_mac64.zip".format(file_vr)
-            driver = "chromedriver"
-        elif Config.SYS == "win":
-            file = "chromedriver_win32.zip".format(file_vr)
-            driver = "chromedriver.exe"
-        else:
-            file = "chromedriver_linux64.zip".format(file_vr)
-            driver = "chromedriver"
-        # url = "{}{}/{}".format(Config.driver_url, file_vr[0], file)
-        r = requests.get("{}{}/{}".format(Config.driver_url, file_vr[0], file))
+        file = f"chromedriver-{Config.system_type}.zip"
+        url = f"{Config.driver_url}{file_vr}/{Config.system_type}/{file}"
+        r = requests.get(url)
         with open(file, "wb") as f:
             f.write(r.content)
         cls.unzip_driver(file)
-        # cls.change_driver_name(file_vr, driver)
         os.remove(file)
 
 
@@ -204,13 +172,26 @@ class Browser(object):
     @classmethod
     def unzip_win(cls, filename):
         """unzip zip file"""
-        with zipfile.ZipFile(filename) as f:
-            for names in f.namelist():
-                f.extract(names, Config.driver_dir)
+        # 解压文件
+        shutil.unpack_archive(filename, extract_dir=Config.driver_dir)
+
+        # 移动文件
+        src_file = os.path.join(Config.driver_dir, f'chromedriver-{Config.system_type}', 'chromedriver.exe')
+        dst_file = os.path.join(Config.driver_dir, 'chromedriver.exe')
+        shutil.move(src_file, dst_file)
+
+        # 删除目录
+        dir_to_remove = os.path.join(Config.driver_dir, 'chromedriver-win64')
+        shutil.rmtree(dir_to_remove)
 
 
 if __name__ == '__main__':
     browser = Browser()
-    vr = browser.search_ver('')
-    browser.gen_driver(vr)
-
+    driver_version = browser.get_chromedriver_version(Config.driver_path)
+    browser_version = browser.search_ver('')
+    if browser.check_version(browser_version, driver_version):
+        print("Driver is up to date!")
+    else:
+        print("Driver is outdated! Updating...")
+        browser.gen_driver(browser_version)
+        print("Driver updated successfully!")
