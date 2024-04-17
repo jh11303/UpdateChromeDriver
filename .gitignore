@@ -5,3 +5,4 @@ tmp
 build
 
 *.spec
+dist/chromedriver-win64.zip
